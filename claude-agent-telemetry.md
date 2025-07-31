@@ -80,6 +80,180 @@ Claude Code Session
    Dashboard (Grafana)
 ```
 
+## Claude Code Hooks Implementation Guide
+
+### Overview
+Claude Code hooks are configuration-based scripts that execute at specific points during tool usage. This system enables real-time telemetry capture for security monitoring.
+
+### Required Components
+
+#### 1. Hook Script (`~/.claude/telemetry-hook.sh`)
+```bash
+#!/bin/bash
+# Claude Code Telemetry Hook
+# Receives JSON input via stdin and logs tool usage
+
+# Read JSON input from stdin
+JSON_INPUT=$(cat)
+
+# Extract data from JSON input
+TIMESTAMP=$(date -Iseconds)
+PROJECT_PATH="${PWD}"
+PROJECT_NAME=$(basename "$PROJECT_PATH")
+
+# Parse Claude Code's actual JSON structure
+TOOL_NAME=$(echo "$JSON_INPUT" | sed -n 's/.*"tool_name":"\([^"]*\)".*/\1/p')
+SESSION_ID=$(echo "$JSON_INPUT" | sed -n 's/.*"session_id":"\([^"]*\)".*/\1/p')
+
+# Default values if parsing fails
+TOOL_NAME="${TOOL_NAME:-unknown}"
+SESSION_ID="${SESSION_ID:-unknown}"
+
+# Handle different tool types
+case "$TOOL_NAME" in
+  "Read")
+    FILE_PATH=$(echo "$JSON_INPUT" | sed -n 's/.*"tool_input":.*"file_path":"\([^"]*\)".*/\1/p')
+    EVENT_TYPE="file_read"
+    ;;
+  "Write")
+    FILE_PATH=$(echo "$JSON_INPUT" | sed -n 's/.*"tool_input":.*"file_path":"\([^"]*\)".*/\1/p')
+    EVENT_TYPE="file_write"
+    ;;
+  "Edit")
+    FILE_PATH=$(echo "$JSON_INPUT" | sed -n 's/.*"tool_input":.*"file_path":"\([^"]*\)".*/\1/p')
+    EVENT_TYPE="file_edit"
+    ;;
+  *)
+    FILE_PATH=""
+    EVENT_TYPE="tool_usage"
+    ;;
+esac
+
+# Get file info if applicable
+FILE_SIZE=0
+OUTSIDE_SCOPE="false"
+if [[ -n "$FILE_PATH" && -f "$FILE_PATH" ]]; then
+    FILE_SIZE=$(stat -c%s "$FILE_PATH" 2>/dev/null || stat -f%z "$FILE_PATH" 2>/dev/null || echo 0)
+    if [[ "$FILE_PATH" != "$PROJECT_PATH"* ]]; then
+        OUTSIDE_SCOPE="true"
+    fi
+fi
+
+# Create telemetry log entry
+LOG_ENTRY=$(cat <<EOF
+{
+  "timestamp": "$TIMESTAMP",
+  "level": "INFO",
+  "event_type": "$EVENT_TYPE",
+  "session_id": "$SESSION_ID",
+  "project_path": "$PROJECT_PATH",
+  "project_name": "$PROJECT_NAME",
+  "tool_name": "$TOOL_NAME",
+  "action_details": {
+    "file_path": "$FILE_PATH",
+    "size_bytes": $FILE_SIZE,
+    "outside_project_scope": $OUTSIDE_SCOPE
+  },
+  "raw_input": $JSON_INPUT
+}
+EOF
+)
+
+# Log to telemetry file
+echo "$LOG_ENTRY" >> "/tmp/claude-telemetry.jsonl"
+
+# Return success to continue tool execution
+echo '{"continue": true}'
+exit 0
+```
+
+#### 2. Configuration (`~/.claude/settings.json`)
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/user/.claude/telemetry-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Claude Code JSON Input Structure
+When a tool is used, Claude Code sends JSON via stdin to the hook script:
+
+```json
+{
+  "session_id": "62d108fd-1cd1-4ec9-8aad-e322e94a6db5",
+  "transcript_path": "/home/user/.claude/projects/.../session.jsonl",
+  "cwd": "/current/working/directory",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/path/to/file.txt",
+    "limit": 10
+  }
+}
+```
+
+### Available Hook Events
+- **PreToolUse**: Executes before any tool runs
+- **PostToolUse**: Executes after tool completion
+- **UserPromptSubmit**: Runs when user submits a prompt
+- **Stop**: Runs when the main agent finishes responding
+- **SessionStart**: Runs when starting a new session
+
+### Setup Instructions
+
+1. **Create the hook script**:
+   ```bash
+   nano ~/.claude/telemetry-hook.sh
+   chmod +x ~/.claude/telemetry-hook.sh
+   ```
+
+2. **Configure Claude Code**:
+   ```bash
+   nano ~/.claude/settings.json
+   # Add the hooks configuration above
+   ```
+
+3. **Test the setup**:
+   ```bash
+   # Clear previous logs
+   rm -f /tmp/claude-telemetry.jsonl
+   
+   # Use Claude Code tools (Read, Write, Edit)
+   # Check logs
+   cat /tmp/claude-telemetry.jsonl
+   ```
+
+4. **Restart Claude Code**: Configuration changes require session restart
+
+### Security Features
+- **Scope monitoring**: Detects file access outside project directory
+- **Session tracking**: Each Claude session gets unique identifier
+- **Tool coverage**: Captures all Claude Code tools (Read, Write, Edit, Bash, etc.)
+- **Real-time logging**: Immediate capture of all tool usage
+
+### Troubleshooting
+- **No logs generated**: Check hook script permissions and configuration syntax
+- **Parse errors**: Verify JSON structure matches expected format
+- **Missing tools**: Ensure `matcher: "*"` captures all tools
+- **Permission issues**: Verify write access to log directory
+
+### Production Considerations
+- **Log rotation**: Implement rotation for `/tmp/claude-telemetry.jsonl`
+- **Persistent storage**: Move logs to `/var/log/` for permanent retention
+- **Performance**: Hook adds ~1-5ms overhead per tool usage
+- **Security**: Secure hook script and configuration files appropriately
+
 ## Implementation Phases
 
 ### Phase 1: Core Telemetry (MVP)
